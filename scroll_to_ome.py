@@ -8,10 +8,12 @@ import copy
 import numpy as np
 import tifffile
 import zarr
+import numcodecs
 import skimage.transform
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count
+from vesuvius_basic_compression import support as sf
 
 '''
 # tiffdir = Path(r"C:\Vesuvius\scroll 1 2000-2030")
@@ -153,7 +155,81 @@ def slice_count(s, maxx):
     mx = min(mx, maxx)
     return mx-mn
 
-def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None):
+def load_tiff(tiffname):
+    return tifffile.imread(tiffname)
+
+def get_tiff_mask(tiff):
+    bits = 8 if tiff.dtype == np.uint8 else 16
+    bits_scaling = 2**bits - 1
+    mask = np.ones(tiff.shape, dtype=np.uint8)
+    tiff_slice_float = tiff.astype(np.float32)/bits_scaling
+    try:
+        mask = sf.create_mask(tiff_slice_float, [0, 0, 0, 0], [3944, 4048], False) # for scroll 1. TODO: generalized
+    except Exception as e:
+        print("Error creating mask for slice %d: %s"%(i, e))
+    return mask
+
+def load_transform(transform_path):
+    with open(transform_path, 'r') as file:
+        data = json.load(file)
+    return np.array(data["params"])
+
+def invert_transform(transform_matrix):
+    inv_transform = np.linalg.inv(transform_matrix)
+    transform_matrix = transform_matrix / transform_matrix[3, 3] # Homogeneous coordinates
+    return inv_transform
+
+def calculate_transform(transform_path):
+    # Generates the transform that brings a volume into the canonical coordinate system up to a 1D scaling factor
+    # TODO
+    transform_matrix = load_transform(transform_path)
+    inv_transform = invert_transform(transform_matrix)
+    return None
+
+def transform_buf_to_tzarr(x , y, z, t):
+    # Transforms from buffer coordinates to zarr unscaled canonical coordinates
+    # TODO
+    return None
+
+def preprocess_tiff(inttiffs, itiff, zero_level=18000, one_level=65535, n_bits=4, apply_mask=False):
+    tiffname = inttiffs[itiff]
+    tiff = load_tiff(tiffname)
+    # Apply mask
+    if apply_mask:
+        mask = get_tiff_mask(tiff)
+        if mask is not None:
+            tiff = tiff * mask
+    # Apply Equalization
+    tiff = np.clip(tiff, zero_level, one_level).astype(np.float64)
+    tiff = (tiff - zero_level)
+    tiff = tiff * 65535
+    tiff = tiff/ (one_level - zero_level)
+    if n_bits < 8:
+        # To uint8
+        tiff = (tiff/256).astype(np.uint8)
+        # Zero 8 - n bits
+        trailing_zero_bits = 8 - n_bits
+        bit_mask = int(2**8 - 1 - 2**trailing_zero_bits)
+    else:
+        # To uint16
+        tiff = tiff.astype(np.uint16)
+        # Zero 16 - n bits
+        trailing_zero_bits = 16 - n_bits
+        bit_mask = int(2**16 - 1 - 2**trailing_zero_bits)
+    tiff = (tiff & bit_mask).astype(tiff.dtype)
+    tiff = tiff.astype(np.uint16) * 255 # Debug ONLY with khartes
+    return tiff
+
+def write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, transform=None):
+    # TODO: Implement this with transform
+    if transform is None:
+        tzarr[zs:z,ys:ye,:] = buf[:ze-zs,:ye-ys,:]
+    else:
+        # Transform the buffer to the canonical coordinate system
+        # TODO
+        pass
+
+def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, zero_level=18000, one_level=65535, n_bits=4, apply_mask=False, transform=None):
     if slices is None:
         xslice = yslice = zslice = None
     else:
@@ -207,7 +283,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None):
     cz = maxz-z0+1
     
     try:
-        tiff0 = tifffile.imread(inttiffs[minz])
+        tiff0 = preprocess_tiff(inttiffs, minz, zero_level=zero_level, one_level=one_level, n_bits=n_bits, apply_mask=apply_mask)
     except Exception as e:
         err = "Error reading %s: %s"%(inttiffs[minz],e)
         print(err)
@@ -229,6 +305,8 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None):
     print("cx,cy,cz",cx,cy,cz)
     print("x0,y0,z0",x0,y0,z0)
     
+    # compressor = numcodecs.zfpy.ZFPY(mode=None, tolerance=3)
+    compressor = numcodecs.Blosc(cname='zstd', clevel=9, shuffle=numcodecs.Blosc.BITSHUFFLE)
     store = zarr.NestedDirectoryStore(zarrdir)
     tzarr = zarr.open(
             store=store, 
@@ -237,7 +315,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None):
             dtype = tiff0.dtype,
             write_empty_chunks=False,
             fill_value=0,
-            compressor=None,
+            compressor=compressor,
             mode='w', 
             )
 
@@ -265,7 +343,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None):
             try:
                 print("reading",itiff,"     ", end='\r')
                 # print("reading",itiff)
-                tarr = tifffile.imread(tiffname)
+                tarr = preprocess_tiff(inttiffs, itiff, zero_level=zero_level, one_level=one_level, n_bits=n_bits, apply_mask=apply_mask)
             except Exception as e:
                 print("\nError reading",tiffname,":",e)
                 # If reading fails (file missing or deformed)
@@ -287,7 +365,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None):
                         print("\nwriting, z range %d,%d"%(zs+z0, ze+z0))
                     else:
                         print("\nwriting, z range %d,%d  y range %d,%d"%(zs+z0, ze+z0, ys+y0, ye+y0))
-                    tzarr[zs:z,ys:ye,:] = buf[:ze-zs,:ye-ys,:]
+                    write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, transform=transform)
                     buf[:,:,:] = 0
                 prev_zc = cur_zc
             cur_bufz = z-cur_zc*chunk_size
@@ -305,7 +383,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None):
                     print("\nwriting, z range %d,%d  y range %d,%d"%(zs+z0, ze+z0, ys+y0, ye+y0))
                 # print("\nwriting (end)", zs, ze)
                 # tzarr[zs:zs+bufnz,:,:] = buf[0:(1+cur_bufz)]
-                tzarr[zs:ze,ys:ye,:] = buf[:ze-zs,:ye-ys,:]
+                write_to_zarr(tzarr, buf, zs, ze, ze, ys, ye, transform=transform)
             else:
                 print("\n(end)")
         buf[:,:,:] = 0
@@ -435,6 +513,16 @@ def main():
             type=int, 
             default=None, 
             help="Advanced: If some subdivision levels already exist, create new levels, starting with this one")
+    parser.add_argument(
+            "--n_bits",
+            type=int,
+            default=5,
+            help="Number of bits to use for the output data")
+    parser.add_argument(
+            "--no_masking",
+            action="store_true",
+            help="Apply a mask to the data")
+
 
     args = parser.parse_args()
     
@@ -459,6 +547,7 @@ def main():
     first_new_level = args.first_new_level
     if first_new_level is not None and first_new_level < 1:
         print("first_new_level must be at least 1")
+    n_bits = args.n_bits
     
     slices = None
     if args.ranges is not None:
@@ -484,7 +573,7 @@ def main():
     # tifs2zarr(tiffdir, zarrdir, chunk_size, slices=slices, maxgb=maxgb)
     
     if zarr_only:
-        err = tifs2zarr(tiffdir, zarrdir, chunk_size, slices=slices, maxgb=maxgb)
+        err = tifs2zarr(tiffdir, zarrdir, chunk_size, slices=slices, maxgb=maxgb, zero_level=25000, one_level=65535, n_bits=n_bits, apply_mask=not args.no_masking, transform=None)
         if err is not None:
             print("error returned:", err)
             return 1
@@ -503,7 +592,7 @@ def main():
     
     if first_new_level is None:
         print("Creating level 0")
-        err = tifs2zarr(tiffdir, zarrdir/"0", chunk_size, slices=slices, maxgb=maxgb)
+        err = tifs2zarr(tiffdir, zarrdir/"0", chunk_size, slices=slices, maxgb=maxgb, zero_level=25000, one_level=65535, n_bits=n_bits, apply_mask=not args.no_masking, transform=None)
         if err is not None:
             print("error returned:", err)
             return 1
