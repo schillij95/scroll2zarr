@@ -2,6 +2,7 @@ import zarr
 import os
 from typing import Union
 import json
+import numcodecs
 try:
     import cupy as xp
     # Check if a GPU is available
@@ -57,11 +58,13 @@ def equalize(zarrpath: Union[str, os.PathLike], divisor_range: int = 12, min_ran
             return volume.astype(z[0].dtype)
 
         nz = zarr.open(new_path, mode='w')
-
+        
         with open(os.path.join(zarrpath, '.zattrs')) as f:
             metadata = json.load(f)
         with open(os.path.join(new_path, '.zattrs'), 'w') as f:
             json.dump(metadata, f)
+
+        compressor = numcodecs.Blosc(cname='zstd', clevel=9, shuffle=numcodecs.Blosc.BITSHUFFLE)
 
         for array_name in z.array_keys():
             source_array = z[array_name]
@@ -69,7 +72,8 @@ def equalize(zarrpath: Union[str, os.PathLike], divisor_range: int = 12, min_ran
                 array_name,
                 shape=source_array.shape,
                 chunks=source_array.chunks,
-                dtype=source_array.dtype
+                dtype=source_array.dtype,
+                compressor=compressor,
             )
             nz_array.attrs.put(source_array.attrs.asdict())
 
