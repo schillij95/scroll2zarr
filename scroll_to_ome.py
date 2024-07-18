@@ -14,6 +14,7 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count
 from vesuvius_basic_compression import support as sf
+from equalizer import equalize
 
 '''
 # tiffdir = Path(r"C:\Vesuvius\scroll 1 2000-2030")
@@ -522,11 +523,17 @@ def main():
             "--no_masking",
             action="store_true",
             help="Apply a mask to the data")
+    
+    parser.add_argument(
+            "--equalization",
+            action="store_true",
+            help="Equalize the data in the air-papyrus intensity range."
+    )
 
 
     args = parser.parse_args()
     
-    zarrdir = Path(args.output_zarr_ome_dir)
+    zarrdir = Path(cc)
     if zarrdir.suffix != ".zarr":
         print("Name of ouput zarr directory must end with '.zarr'")
         return 1
@@ -607,5 +614,10 @@ def main():
             print("error returned:", err)
             return 1
 
+    if args.equalization:
+        try:
+            equalize(args.output_zarr_ome_dir)
+        except:
+            raise RuntimeError("Error during equalization.")
 if __name__ == '__main__':
     sys.exit(main())
