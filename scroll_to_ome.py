@@ -533,7 +533,7 @@ def main():
 
     args = parser.parse_args()
     
-    zarrdir = Path(cc)
+    zarrdir = Path(args.output_zarr_ome_dir)
     if zarrdir.suffix != ".zarr":
         print("Name of ouput zarr directory must end with '.zarr'")
         return 1
