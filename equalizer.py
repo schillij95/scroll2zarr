@@ -43,18 +43,18 @@ def equalize(zarrpath: Union[str, os.PathLike], divisor_range: int = 12, min_ran
         sorted_means, sorted_stds = zip(*zipped)
 
         # Compute the required values
-        value1 = sorted_means[0] - sorted_stds[0]/2.
-        value2 = sorted_means[1] + sorted_stds[1]/2.
+        value1 = sorted_means[0] # - sorted_stds[0]/2. removing this for air, probably not needed
+        value2 = sorted_means[1] + sorted_stds[1]/2. # taking one half standard deviation more for papyrus
 
         dir_path = os.path.dirname(zarrpath)
         base_name = os.path.basename(zarrpath)
         new_path = os.path.join(dir_path, base_name[:-5] + '_equalized.zarr')
 
         def transform_function(volume, min_value=value1, max_value=value2):
-            np.clip(volume, min_value, max_value, out=volume)
+            np.clip(volume, min_value, max_value+np.finfo(volume.dtype).tiny, out=volume)
             volume -= min_value
             volume *= np.iinfo(z[0].dtype).max / (max_value - min_value)
-            np.clip(volume, 0, np.iinfo(z[0].dtype).max, out=volume)
+            np.clip(volume, 0, np.iinfo(z[0].dtype).max+np.finfo(volume.dtype).tiny, out=volume)
             return volume.astype(z[0].dtype)
 
         nz = zarr.open(new_path, mode='w')
