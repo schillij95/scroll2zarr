@@ -1,4 +1,5 @@
 import sys
+import os
 import re
 from pathlib import Path
 import json
@@ -6,6 +7,7 @@ import shutil
 import argparse
 import copy
 import numpy as np
+import cv2
 import tifffile
 import zarr
 import numcodecs
@@ -14,7 +16,11 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count
 from vesuvius_basic_compression import support as sf
-from equalizer import equalize
+from sklearn.mixture import GaussianMixture
+import glob
+import re
+
+inside_coordinates = None
 
 '''
 # tiffdir = Path(r"C:\Vesuvius\scroll 1 2000-2030")
@@ -74,6 +80,9 @@ def create_ome_dir(zarrdir):
         return err
 
     try:
+        # Create directory
+        os.makedirs(os.path.dirname(zarrdir), exist_ok=True)
+        # Create zarr directory
         zarrdir.mkdir()
     except Exception as e:
         err = "Error while creating %s: %s"%(zarrdir, e)
@@ -159,86 +168,7 @@ def slice_count(s, maxx):
 def load_tiff(tiffname):
     return tifffile.imread(tiffname)
 
-def get_tiff_mask(tiff):
-    bits = 8 if tiff.dtype == np.uint8 else 16
-    bits_scaling = 2**bits - 1
-    mask = np.ones(tiff.shape, dtype=np.uint8)
-    tiff_slice_float = tiff.astype(np.float32)/bits_scaling
-    try:
-        mask = sf.create_mask(tiff_slice_float, [0, 0, 0, 0], [3944, 4048], False) # for scroll 1. TODO: generalized
-    except Exception as e:
-        print("Error creating mask for slice %d: %s"%(i, e))
-    return mask
-
-def load_transform(transform_path):
-    with open(transform_path, 'r') as file:
-        data = json.load(file)
-    return np.array(data["params"])
-
-def invert_transform(transform_matrix):
-    inv_transform = np.linalg.inv(transform_matrix)
-    transform_matrix = transform_matrix / transform_matrix[3, 3] # Homogeneous coordinates
-    return inv_transform
-
-def calculate_transform(transform_path):
-    # Generates the transform that brings a volume into the canonical coordinate system up to a 1D scaling factor
-    # TODO
-    transform_matrix = load_transform(transform_path)
-    inv_transform = invert_transform(transform_matrix)
-    return None
-
-def transform_buf_to_tzarr(x , y, z, t):
-    # Transforms from buffer coordinates to zarr unscaled canonical coordinates
-    # TODO
-    return None
-
-def preprocess_tiff(inttiffs, itiff, zero_level=18000, one_level=65535, n_bits=4, apply_mask=False):
-    tiffname = inttiffs[itiff]
-    tiff = load_tiff(tiffname)
-    # Apply mask
-    if apply_mask:
-        mask = get_tiff_mask(tiff)
-        if mask is not None:
-            tiff = tiff * mask
-    # Apply Equalization
-    tiff = np.clip(tiff, zero_level, one_level).astype(np.float64)
-    tiff = (tiff - zero_level)
-    tiff = tiff * 65535
-    tiff = tiff/ (one_level - zero_level)
-    if n_bits < 8:
-        # To uint8
-        tiff = (tiff/256).astype(np.uint8)
-        # Zero 8 - n bits
-        trailing_zero_bits = 8 - n_bits
-        bit_mask = int(2**8 - 1 - 2**trailing_zero_bits)
-    else:
-        # To uint16
-        tiff = tiff.astype(np.uint16)
-        # Zero 16 - n bits
-        trailing_zero_bits = 16 - n_bits
-        bit_mask = int(2**16 - 1 - 2**trailing_zero_bits)
-    tiff = (tiff & bit_mask).astype(tiff.dtype)
-    tiff = tiff.astype(np.uint16) * 255 # Debug ONLY with khartes
-    return tiff
-
-def write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, transform=None):
-    # TODO: Implement this with transform
-    if transform is None:
-        tzarr[zs:z,ys:ye,:] = buf[:ze-zs,:ye-ys,:]
-    else:
-        # Transform the buffer to the canonical coordinate system
-        # TODO
-        pass
-
-def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, zero_level=18000, one_level=65535, n_bits=4, apply_mask=False, transform=None):
-    if slices is None:
-        xslice = yslice = zslice = None
-    else:
-        xslice, yslice, zslice = slices
-        if not all([slice_step_is_1(s) for s in slices]):
-            err = "All slice steps must be 1 in slices"
-            print(err)
-            return err
+def get_tiffs(tiffdir):
     # Note this is a generator, not a list
     tiffs = tiffdir.glob("*.tif")
     rec = re.compile(r'([0-9]+)\.\w+$')
@@ -265,6 +195,190 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, zero_level=
     
     itiffs = list(inttiffs.keys())
     itiffs.sort()
+    
+    return inttiffs, itiffs
+
+def get_tiff_volume_mask(tiff, itiff):
+    # Find a region in the tiff that contains a fair mix of 0's and 1's and is close to the center of the image
+    global inside_coordinates
+    if inside_coordinates is None or itiff % 100 == 0:
+        # Non-Air pixels
+        max_value = np.iinfo(tiff.dtype).max
+        non_air = tiff > (max_value // 2)
+        mean_x = np.mean(non_air, axis=0)
+        mean_y = np.mean(non_air, axis=1)
+        # print(f"Shape of means: {mean_x.shape}, {mean_y.shape}")
+        # Sliding window of size 200 over means, calculate the sum of the means in the window
+        window_size = 200
+        assert window_size < mean_x.shape[0] and window_size < mean_y.shape[0], "Window size too large"
+        sum_x = np.convolve(mean_x, np.ones(window_size), mode='same')
+        sum_y = np.convolve(mean_y, np.ones(window_size), mode='same')
+        assert sum_x.shape[0] == mean_x.shape[0] and sum_y.shape[0] == mean_y.shape[0], "Convolution failed"
+        # Find the region with the highest sum
+        max_sum_x = np.argmax(sum_x)
+        max_sum_y = np.argmax(sum_y)
+        # print(f"inside coordinates x: {max_sum_x}, y: {max_sum_y}")
+        # Get coordinates that lay inside the scroll for this slice
+        inside_coordinates = [max_sum_x, max_sum_y]
+
+    # Scale to 0-1
+    bits = 8 if tiff.dtype == np.uint8 else 16
+    bits_scaling = 2**bits - 1
+    mask = np.ones(tiff.shape, dtype=np.uint8)
+    tiff_slice_float = tiff.astype(np.float32)/bits_scaling
+
+    try:
+        # TODO: implement CAD Case masking
+        mask = sf.create_mask(tiff_slice_float, [0, 0, 0, 0], inside_coordinates, False)
+    except Exception as e:
+        print(f"Error creating mask for slice ?: {e}")
+    return mask
+
+def get_tiff_surface_mask(mask_path):
+    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    mask = mask // 255
+    return mask
+
+def load_transform(transform_path):
+    with open(transform_path, 'r') as file:
+        data = json.load(file)
+    return np.array(data["params"])
+
+def invert_transform(transform_matrix):
+    inv_transform = np.linalg.inv(transform_matrix)
+    transform_matrix = transform_matrix / transform_matrix[3, 3] # Homogeneous coordinates
+    return inv_transform
+
+def get_transforms(tiffdir, original_volume_id):
+    transform_path = tiffdir / ".." / ".." / "transforms"
+    transform_to_canonical_path = glob.glob(os.path.join(f"{transform_path}",f"*-to-{original_volume_id}.json"))
+    if len(transform_to_canonical_path) == 0:
+        transform_to_canonical = np.eye(4)
+    else:
+        transform_to_canonical_path = transform_to_canonical_path[0]
+        transform_to_canonical = load_transform(transform_to_canonical_path)
+
+    # Generates the transform that brings a volume into the canonical coordinate system up to a 1D scaling factor
+    transform_matrix = transform_to_canonical # TODO
+
+    return transform_matrix, invert_transform(transform_matrix)
+
+def transform_buf_to_tzarr(x , y, z, t):
+    # Transforms from buffer coordinates to zarr unscaled canonical coordinates
+    # TODO
+    return None
+
+def equalize(tiffdir, n_components=4):
+    """
+    Loads TIFF images from a directory, extracts a central chunk, and fits a Gaussian Mixture Model to
+    the pixel values. Computes and returns parameters based on the means and standard deviations of the
+    mixture components.
+
+    Parameters:
+        tiffdir (str): Directory containing TIFF files.
+        n_components (int): Number of components for the Gaussian mixture model.
+
+    Returns:
+        tuple: Two computed values based on the Gaussian components.
+    """
+    # load paths of tiffs
+    inttiffs, itiffs = get_tiffs(tiffdir)
+    # get the first tiff
+    minz = itiffs[0]
+    tiffname = inttiffs[minz]
+    tiff = load_tiff(tiffname)
+    # calculate the chunk shape
+    tiff_shape = tiff.shape
+    z_len = len(itiffs)
+    z_min = z_len // 2 - 10
+    z_max = z_len // 2 + 10
+    z_len = z_max - z_min
+    chunk = np.zeros((z_len, tiff_shape[0], tiff_shape[1]), dtype=tiff.dtype)
+    # load the chunk ct data
+    for i in range(z_min, z_max):
+        chunk[i-z_min] = load_tiff(inttiffs[i])
+    # Only take every 5th pixel in xy
+    chunk = chunk[:, ::5, ::5]
+    # take only the central 1/3 of the xy axis
+    chunk = chunk[:, chunk.shape[1]//3:2*chunk.shape[1]//3, chunk.shape[2]//3:2*chunk.shape[2]//3]
+
+    ### Calculate the equalization parameters ###
+    print("Calculating equalization parameters...")
+    gmm = GaussianMixture(n_components=n_components, verbose=1, verbose_interval=1)
+    gmm.fit(chunk.reshape(-1, 1))
+
+    means = gmm.means_.flatten()
+    stds = np.sqrt(gmm.covariances_.reshape(n_components, 1, 1).flatten())
+
+    # Zip and sort means and standard deviations with respect to means
+    zipped = sorted(zip(means, stds), key=lambda x: x[0])
+    sorted_means, sorted_stds = zip(*zipped)
+
+    print(f"Means: {sorted_means}, Stds: {sorted_stds}")
+
+    # Compute the required values
+    value1 = sorted_means[0] + sorted_stds[0] # remove all air up to one std
+    value2 = sorted_means[-1] + 2.0 * sorted_stds[-1] # taking two standard deviation more for papyrus
+    print(f"Equalization parameters: {value1}, {value2}")
+    return value1, value2
+
+def preprocess_tiff(inttiffs, itiff, standard_config):
+    tiffname = inttiffs[itiff]
+    tiff = load_tiff(tiffname)
+    if standard_config['standardize']:
+        # Apply mask
+        if standard_config['volume_type'] == "scroll_volume":
+            mask = get_tiff_volume_mask(tiff, itiff)
+        elif standard_config['volume_type'] == "surface_volume":
+            mask = get_tiff_surface_mask(standard_config['mask_path'])
+        else:
+            raise NotImplementedError(f"Volume type {standard_config['volume_type']} not implemented")
+        if mask is not None:
+            tiff = tiff * mask
+        # Apply Equalization
+        tiff = np.clip(tiff, standard_config['equalization_min'], standard_config['equalization_max']).astype(np.float64)
+        tiff = (tiff - standard_config['equalization_min'])
+        tiff = tiff * 65535
+        tiff = tiff/ (standard_config['equalization_max'] - standard_config['equalization_min'])
+        # Apply bit reduction
+        if standard_config['n_bits'] < 8:
+            # To uint8
+            tiff = (tiff/256).astype(np.uint8)
+            # Zero 8 - n bits
+            trailing_zero_bits = 8 - standard_config['n_bits']
+            bit_mask = int(2**8 - 1 - 2**trailing_zero_bits)
+        else:
+            # To uint16
+            tiff = tiff.astype(np.uint16)
+            # Zero 16 - n bits
+            trailing_zero_bits = 16 - standard_config['n_bits']
+            bit_mask = int(2**16 - 1 - 2**trailing_zero_bits)
+        tiff = (tiff & bit_mask).astype(tiff.dtype)
+        tiff = tiff.astype(np.uint16) * 255 # Debug ONLY with Khartes
+    return tiff
+
+def write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, transform=None):
+    # TODO: Implement this with transform
+    if transform is None:
+        tzarr[zs:z,ys:ye,:] = buf[:ze-zs,:ye-ys,:]
+    else:
+        # Transform the buffer to the canonical coordinate system
+        # TODO
+        pass
+
+def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_config=None, transform=None):
+    if slices is None:
+        xslice = yslice = zslice = None
+    else:
+        xslice, yslice, zslice = slices
+        if not all([slice_step_is_1(s) for s in slices]):
+            err = "All slice steps must be 1 in slices"
+            print(err)
+            return err
+    
+    # Load tiff paths
+    inttiffs, itiffs = get_tiffs(tiffdir)
+
     z0 = 0
     if zslice is not None:
         maxz = itiffs[-1]+1
@@ -276,15 +390,12 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, zero_level=
         else:
             z0 = zslice.start
     
-    # for testing
-    # itiffs = itiffs[2048:2048+256]
-    
     minz = itiffs[0]
     maxz = itiffs[-1]
     cz = maxz-z0+1
     
     try:
-        tiff0 = preprocess_tiff(inttiffs, minz, zero_level=zero_level, one_level=one_level, n_bits=n_bits, apply_mask=apply_mask)
+        tiff0 = load_tiff(inttiffs[minz])
     except Exception as e:
         err = "Error reading %s: %s"%(inttiffs[minz],e)
         print(err)
@@ -344,7 +455,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, zero_level=
             try:
                 print("reading",itiff,"     ", end='\r')
                 # print("reading",itiff)
-                tarr = preprocess_tiff(inttiffs, itiff, zero_level=zero_level, one_level=one_level, n_bits=n_bits, apply_mask=apply_mask)
+                tarr = preprocess_tiff(inttiffs, itiff, standard_config)
             except Exception as e:
                 print("\nError reading",tiffname,":",e)
                 # If reading fails (file missing or deformed)
@@ -366,6 +477,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, zero_level=
                         print("\nwriting, z range %d,%d"%(zs+z0, ze+z0))
                     else:
                         print("\nwriting, z range %d,%d  y range %d,%d"%(zs+z0, ze+z0, ys+y0, ye+y0))
+                    # write buf to zarr
                     write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, transform=transform)
                     buf[:,:,:] = 0
                 prev_zc = cur_zc
@@ -384,6 +496,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, zero_level=
                     print("\nwriting, z range %d,%d  y range %d,%d"%(zs+z0, ze+z0, ys+y0, ye+y0))
                 # print("\nwriting (end)", zs, ze)
                 # tzarr[zs:zs+bufnz,:,:] = buf[0:(1+cur_bufz)]
+                # write buf to zarr
                 write_to_zarr(tzarr, buf, zs, ze, ze, ys, ye, transform=transform)
             else:
                 print("\n(end)")
@@ -461,6 +574,74 @@ def resize(zarrdir, old_level, num_threads, algorithm="mean"):
 
     print("Processing complete")
 
+def get_zarr_name(standard_config):
+    # Get the zarr name from the standardization parameters
+    scroll_id = standard_config['scroll_id']
+    scroll_metadata_path = os.path.join(standard_config['volume_dir'], f"meta.json")
+    scroll_metadata = json.load(open(scroll_metadata_path))
+    resolution = scroll_metadata['voxelsize']
+    def extract_kev(name):
+        # Regular expression to find the keV value in the name string
+        match = re.search(r'(\d+)\s*keV', name, re.IGNORECASE)
+        if match:
+            return match.group(1)  # Returns the keV value as a string
+        raise ValueError(f"Could not find keV value in {name}")
+    kev = extract_kev(scroll_metadata['name'])
+    zarr_name = f"{scroll_id}_{kev}keV_{resolution}mum"
+    if standard_config['volume_type'] == "surface_volume":
+        segment_id = standard_config['segment_id']
+        zarr_name = os.path.join(zarr_name, f"{segment_id}")
+    zarr_name += ".zarr"
+    print(f"Zarr name: {zarr_name}")
+    return zarr_name
+
+def get_standard_config(tiffdir, output, volume_type):
+    # Get the standardization parameters from the tiff directory
+    standard_config = {}
+    # Volume type
+    standard_config['volume_type'] = volume_type
+    # Volume dir
+    if volume_type == "scroll_volume":
+        standard_config['volume_dir'] = tiffdir
+    elif volume_type == "surface_volume":
+        # Get the segment ID from the tiff directory
+        segment_id = os.path.basename(os.path.dirname(tiffdir))
+        standard_config['segment_id'] = segment_id
+        mask_path = os.path.join(os.path.dirname(tiffdir), f"{standard_config['segment_id']}_mask.png")
+        standard_config['mask_path'] = mask_path
+        surface_volume_meate_path = os.path.join(os.path.dirname(tiffdir), "meta.json")
+        surface_volume_meta = json.load(open(surface_volume_meate_path))
+        volume_id = surface_volume_meta['volume']
+        volume_dir = os.path.join(tiffdir, "..", "..", "..", "volumes", volume_id)
+        # Normalize the path
+        volume_dir = os.path.normpath(volume_dir)
+        standard_config['volume_dir'] = Path(volume_dir)
+    else:
+        raise NotImplementedError("Only scroll volumes are supported at the moment")
+    # Volume ID
+    volume_id = os.path.basename(standard_config['volume_dir'])
+    standard_config['volume_id'] = volume_id
+    # tiffdir is basepath/scrollid/scroll_name/volumes/volume_id
+    # Scroll name
+    scroll_name = os.path.basename(os.path.dirname(os.path.dirname(standard_config['volume_dir']))) 
+    standard_config['scroll_name'] = scroll_name.split(".")[0]
+    # Scroll ID
+    scroll_id = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(standard_config['volume_dir']))))
+    standard_config['scroll_id'] = scroll_id
+    print(f"standard_config: {standard_config}")
+    # Add the zarr name to the standardization parameters
+    standard_config['zarr_name'] = get_zarr_name(standard_config)
+    standard_config['zarr_dir'] = os.path.join(output, standard_config['zarr_name'])
+    # Transform from the original volume to the canonical volume
+    transform_to_canonical, transform_from_canonical = get_transforms(standard_config['volume_dir'], volume_id)
+    standard_config['transform_to_canonical'] = transform_to_canonical
+    standard_config['transform_from_canonical'] = transform_from_canonical
+    # Image equalization of 0 = Air to dtype.max = Papyrus
+    equalization_min, equalization_max = equalize(standard_config['volume_dir'], n_components=4)
+    standard_config['equalization_min'] = equalization_min
+    standard_config['equalization_max'] = equalization_max
+    return standard_config
+
 def main():
     # parser = argparse.ArgumentParser()
     parser = argparse.ArgumentParser(
@@ -470,8 +651,8 @@ def main():
             "input_tiff_dir", 
             help="Directory containing tiff files")
     parser.add_argument(
-            "output_zarr_ome_dir", 
-            help="Name of directory that will contain OME/zarr datastore")
+            "output", 
+            help="Name of directory that will contain the OME/zarr datastore dir")
     parser.add_argument(
             "--chunk_size", 
             type=int, 
@@ -520,23 +701,13 @@ def main():
             default=5,
             help="Number of bits to use for the output data")
     parser.add_argument(
-            "--no_masking",
+            "--standardize",
             action="store_true",
-            help="Apply a mask to the data")
-    
-    parser.add_argument(
-            "--equalization",
-            action="store_true",
-            help="Equalize the data in the air-papyrus intensity range."
+            help="Create standardized volume format (equalize, mask, transform, etc.)"
     )
 
 
     args = parser.parse_args()
-    
-    zarrdir = Path(args.output_zarr_ome_dir)
-    if zarrdir.suffix != ".zarr":
-        print("Name of ouput zarr directory must end with '.zarr'")
-        return 1
     
     tiffdir = Path(args.input_tiff_dir)
     if not tiffdir.exists() and args.first_new_level is None:
@@ -564,6 +735,22 @@ def main():
             return 1
     
     print("slices", slices)
+    
+    # Load the standardization parameters
+    if args.standardize:
+        volume_type = "surface_volume" if os.path.basename(tiffdir) == "layers" else "scroll_volume"
+        standard_config = get_standard_config(tiffdir, args.output, volume_type)
+    else:
+        standard_config = {'zar_dir': args.output}
+    # N bits to use for the output data
+    standard_config['n_bits'] = n_bits
+    # Standardize flag
+    standard_config['standardize'] = args.standardize
+    
+    zarrdir = Path(standard_config['zarr_dir'])
+    if zarrdir.suffix != ".zarr":
+        print("Name of ouput zarr directory must end with '.zarr'")
+        return 1
 
     # even if overwrite flag is False, overwriting is permitted
     # when the user has set first_new_level
@@ -577,10 +764,8 @@ def main():
             print("removing", zarrdir)
             shutil.rmtree(zarrdir)
     
-    # tifs2zarr(tiffdir, zarrdir, chunk_size, slices=slices, maxgb=maxgb)
-    
     if zarr_only:
-        err = tifs2zarr(tiffdir, zarrdir, chunk_size, slices=slices, maxgb=maxgb, zero_level=25000, one_level=65535, n_bits=n_bits, apply_mask=not args.no_masking, transform=None)
+        err = tifs2zarr(tiffdir, zarrdir, chunk_size, slices=slices, maxgb=maxgb, standard_config=standard_config, transform=None)
         if err is not None:
             print("error returned:", err)
             return 1
@@ -599,7 +784,7 @@ def main():
     
     if first_new_level is None:
         print("Creating level 0")
-        err = tifs2zarr(tiffdir, zarrdir/"0", chunk_size, slices=slices, maxgb=maxgb, zero_level=25000, one_level=65535, n_bits=n_bits, apply_mask=not args.no_masking, transform=None)
+        err = tifs2zarr(tiffdir, zarrdir/"0", chunk_size, slices=slices, maxgb=maxgb, standard_config=standard_config, transform=None)
         if err is not None:
             print("error returned:", err)
             return 1
@@ -614,10 +799,5 @@ def main():
             print("error returned:", err)
             return 1
 
-    if args.equalization:
-        try:
-            equalize(args.output_zarr_ome_dir)
-        except:
-            raise RuntimeError("Error during equalization.")
 if __name__ == '__main__':
     sys.exit(main())
