@@ -249,19 +249,35 @@ def invert_transform(transform_matrix):
     transform_matrix = transform_matrix / transform_matrix[3, 3] # Homogeneous coordinates
     return inv_transform
 
+def get_voxelsize(meta_path):
+    meta = json.load(open(meta_path))
+    return meta['voxelsize']
+
 def get_transforms(tiffdir, original_volume_id):
     transform_path = tiffdir / ".." / ".." / "transforms"
-    transform_to_canonical_path = glob.glob(os.path.join(f"{transform_path}",f"*-to-{original_volume_id}.json"))
-    if len(transform_to_canonical_path) == 0:
+    transform_from_canonical_path = glob.glob(os.path.join(f"{transform_path}",f"*-to-{original_volume_id}.json"))
+    if len(transform_from_canonical_path) == 0:
         transform_to_canonical = np.eye(4)
+        scale = 1.0
     else:
-        transform_to_canonical_path = transform_to_canonical_path[0]
-        transform_to_canonical = load_transform(transform_to_canonical_path)
+        transform_from_canonical_path = transform_from_canonical_path[0]
+        transform_from_canonical = load_transform(transform_from_canonical_path)
+        vol_id0 = os.path.basename(transform_from_canonical_path).split("-")[0]
+        # Extract scaling factors of transform
+        meta0_path = tiffdir / ".." / vol_id0 / "meta.json"
+        voxelsize0 = get_voxelsize(meta0_path)
+        meta1_path = tiffdir / ".." / original_volume_id / "meta.json"
+        voxelsize1 = get_voxelsize(meta1_path)
+        scale = voxelsize0 / voxelsize1
+        print(f"Scale: {scale}")
 
+    transform_to_canonical = invert_transform(transform_from_canonical)
+    
     # Generates the transform that brings a volume into the canonical coordinate system up to a 1D scaling factor
-    transform_matrix = transform_to_canonical # TODO
+    transform_to_canonical[:3, :3] *= scale
+    transform_from_canonical[:3, :3] /= scale
 
-    return transform_matrix, invert_transform(transform_matrix)
+    return transform_to_canonical, transform_from_canonical, scale
 
 def transform_buf_to_tzarr(x , y, z, t):
     # Transforms from buffer coordinates to zarr unscaled canonical coordinates
@@ -357,16 +373,24 @@ def preprocess_tiff(inttiffs, itiff, standard_config):
         tiff = tiff.astype(np.uint16) * 255 # Debug ONLY with Khartes
     return tiff
 
-def write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, transform=None):
+def write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, standard_config=None):
     # TODO: Implement this with transform
-    if transform is None:
+    if standard_config is None:
         tzarr[zs:z,ys:ye,:] = buf[:ze-zs,:ye-ys,:]
     else:
         # Transform the buffer to the canonical coordinate system
-        # TODO
+        # TODO: transform_to_canonical
+        transform_to_canonical = standard_config['transform_to_canonical']
+        for z_ in range(zs, z):
+            for y_ in range(ys, ye):
+                for x in range(buf.shape[2]):
+                    p = np.array([x, y_, z_, 1])
+                    p_trans = np.dot(transform_to_canonical, p)[:3]
+                    tzarr[p_trans[2], p_trans[1], p_trans[0]] = buf[z_-zs, y_-ys, x]
+
         pass
 
-def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_config=None, transform=None):
+def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_config=None):
     if slices is None:
         xslice = yslice = zslice = None
     else:
@@ -478,7 +502,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
                     else:
                         print("\nwriting, z range %d,%d  y range %d,%d"%(zs+z0, ze+z0, ys+y0, ye+y0))
                     # write buf to zarr
-                    write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, transform=transform)
+                    write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, standard_config=standard_config)
                     buf[:,:,:] = 0
                 prev_zc = cur_zc
             cur_bufz = z-cur_zc*chunk_size
@@ -497,7 +521,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
                 # print("\nwriting (end)", zs, ze)
                 # tzarr[zs:zs+bufnz,:,:] = buf[0:(1+cur_bufz)]
                 # write buf to zarr
-                write_to_zarr(tzarr, buf, zs, ze, ze, ys, ye, transform=transform)
+                write_to_zarr(tzarr, buf, zs, ze, ze, ys, ye, standard_config=standard_config)
             else:
                 print("\n(end)")
         buf[:,:,:] = 0
@@ -633,9 +657,10 @@ def get_standard_config(tiffdir, output, volume_type):
     standard_config['zarr_name'] = get_zarr_name(standard_config)
     standard_config['zarr_dir'] = os.path.join(output, standard_config['zarr_name'])
     # Transform from the original volume to the canonical volume
-    transform_to_canonical, transform_from_canonical = get_transforms(standard_config['volume_dir'], volume_id)
+    transform_from_canonical, transform_to_canonical, scale = get_transforms(standard_config['volume_dir'], volume_id)
     standard_config['transform_to_canonical'] = transform_to_canonical
     standard_config['transform_from_canonical'] = transform_from_canonical
+    standard_config['scale'] = scale
     # Image equalization of 0 = Air to dtype.max = Papyrus
     equalization_min, equalization_max = equalize(standard_config['volume_dir'], n_components=4)
     standard_config['equalization_min'] = equalization_min
@@ -765,7 +790,7 @@ def main():
             shutil.rmtree(zarrdir)
     
     if zarr_only:
-        err = tifs2zarr(tiffdir, zarrdir, chunk_size, slices=slices, maxgb=maxgb, standard_config=standard_config, transform=None)
+        err = tifs2zarr(tiffdir, zarrdir, chunk_size, slices=slices, maxgb=maxgb, standard_config=standard_config)
         if err is not None:
             print("error returned:", err)
             return 1
@@ -784,7 +809,7 @@ def main():
     
     if first_new_level is None:
         print("Creating level 0")
-        err = tifs2zarr(tiffdir, zarrdir/"0", chunk_size, slices=slices, maxgb=maxgb, standard_config=standard_config, transform=None)
+        err = tifs2zarr(tiffdir, zarrdir/"0", chunk_size, slices=slices, maxgb=maxgb, standard_config=standard_config)
         if err is not None:
             print("error returned:", err)
             return 1
