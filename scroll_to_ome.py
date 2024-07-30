@@ -166,7 +166,12 @@ def slice_count(s, maxx):
     return mx-mn
 
 def load_tiff(tiffname):
-    return tifffile.imread(tiffname)
+    if tiffname.endswith('.tif'):
+        return tifffile.imread(tiffname)
+    elif tiffname.endswith('.jpg'):
+        return cv2.imread(tiffname)
+    else:
+        return None
 
 def get_tiffs(tiffdir):
     # Note this is a generator, not a list
