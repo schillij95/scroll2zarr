@@ -170,8 +170,10 @@ def load_tiff(tiffname):
     if str(tiffname).endswith('.tif'):
         return tifffile.imread(tiffname)
     elif str(tiffname).endswith('.jpg'):
+        print("returning jpg")
         return cv2.imread(tiffname)
     else:
+        print("returning none")
         return None
 
 def get_tiffs(tiffdir):
