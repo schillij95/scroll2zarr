@@ -387,7 +387,7 @@ def preprocess_tiff(inttiffs, itiff, standard_config):
 
 def write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, standard_config=None):
     # TODO: Implement this with transform
-    if standard_config is None:
+    if standard_config is None or (not hasattr(standard_config, 'transform_to_canonical')) or standard_config['transform_to_canonical'] is None:
         tzarr[zs:z,ys:ye,:] = buf[:ze-zs,:ye-ys,:]
     else:
         # Transform the buffer to the canonical coordinate system
