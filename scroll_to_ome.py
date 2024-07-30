@@ -171,7 +171,9 @@ def load_tiff(tiffname):
         return tifffile.imread(tiffname)
     elif str(tiffname).endswith('.jpg'):
         print("returning jpg")
-        return cv2.imread(tiffname)
+        image = cv2.imread(tiffname)
+        print(f"shape: {image.shape}")
+        return image[:, :, 0]
     else:
         print("returning none")
         return None
