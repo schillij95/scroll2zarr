@@ -171,6 +171,8 @@ def load_tiff(tiffname):
 def get_tiffs(tiffdir):
     # Note this is a generator, not a list
     tiffs = tiffdir.glob("*.tif")
+    if len(tiffs) == 0:
+        tiffs = tiffdir.glob("*.jpg")
     rec = re.compile(r'([0-9]+)\.\w+$')
     # rec = re.compile(r'[0-9]+$')
     inttiffs = {}
