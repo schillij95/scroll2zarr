@@ -166,6 +166,7 @@ def slice_count(s, maxx):
     return mx-mn
 
 def load_tiff(tiffname):
+    print(tiffname)
     if str(tiffname).endswith('.tif'):
         return tifffile.imread(tiffname)
     elif str(tiffname).endswith('.jpg'):
