@@ -459,7 +459,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
     tzarr = zarr.open(
             store=store, 
             shape=(cz, cy, cx), 
-            chunks=(chunk_size, chunk_size, chunk_size),
+            chunks=chunk_size,
             dtype = tiff0.dtype,
             write_empty_chunks=False,
             fill_value=0,
@@ -470,17 +470,17 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
     # nb of chunks in y direction that fit inside of max_gb
     chy = cy // chunk_size + 1
     if maxgb is not None:
-        maxy = int((maxgb*10**9)/(cx*chunk_size*dt0.itemsize))
+        maxy = int((maxgb*10**9)/(cx*chunk_size[0]*dt0.itemsize))
         chy = maxy // chunk_size
         chy = max(1, chy)
 
     # nb of y chunk groups
-    ncgy = cy // (chunk_size*chy) + 1
+    ncgy = cy // (chunk_size[1]*chy) + 1
     print("chy, ncgy", chy, ncgy)
-    buf = np.zeros((chunk_size, min(cy, chy*chunk_size), cx), dtype=dt0)
+    buf = np.zeros((chunk_size[2], min(cy, chy*chunk_size[1]), cx), dtype=dt0)
     for icy in range(ncgy):
-        ys = icy*chy*chunk_size
-        ye = ys+chy*chunk_size
+        ys = icy*chy*chunk_size[1]
+        ye = ys+chy*chunk_size[1]
         ye = min(ye, cy)
         if ye == ys:
             break
@@ -504,10 +504,10 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
                 continue
             if xslice is not None and yslice is not None:
                 tarr = tarr[yslice, xslice]
-            cur_zc = z // chunk_size
+            cur_zc = z // chunk_size[2]
             if cur_zc != prev_zc:
                 if prev_zc >= 0:
-                    zs = prev_zc*chunk_size
+                    zs = prev_zc*chunk_size[2]
                     ze = zs+chunk_size
                     if ncgy == 1:
                         print("\nwriting, z range %d,%d"%(zs+z0, ze+z0))
@@ -517,13 +517,13 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
                     write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, standard_config=standard_config)
                     buf[:,:,:] = 0
                 prev_zc = cur_zc
-            cur_bufz = z-cur_zc*chunk_size
+            cur_bufz = z-cur_zc*chunk_size[2]
             # print("cur_bufzk,ye,ys", cur_bufz,ye,ys)
             buf[cur_bufz,:ye-ys,:] = tarr[ys:ye,:]
         
         if prev_zc >= 0:
-            zs = prev_zc*chunk_size
-            ze = zs+chunk_size
+            zs = prev_zc*chunk_size[2]
+            ze = zs+chunk_size[2]
             ze = min(itiffs[-1]+1-z0, ze)
             if ze > zs:
                 if ncgy == 1:
@@ -691,10 +691,11 @@ def main():
             "output", 
             help="Name of directory that will contain the OME/zarr datastore dir")
     parser.add_argument(
-            "--chunk_size", 
-            type=int, 
-            default=128, 
-            help="Size of chunk")
+        '--chunk_size',
+        type=int,
+        nargs='+',
+        default=128, 
+        help="Size of chunk")
     parser.add_argument(
             "--nlevels", 
             type=int, 
@@ -752,6 +753,11 @@ def main():
         return 1
 
     chunk_size = args.chunk_size
+    if len(chunk_size) == 1:
+        chunk_size = (chunk_size[0], chunk_size[0], chunk_size[0])
+    elif len(chunk_size) != 3:
+        print("chunk_size must be a single number or 3 numbers")
+        return 1
     nlevels = args.nlevels
     maxgb = args.max_gb
     zarr_only = args.zarr_only
