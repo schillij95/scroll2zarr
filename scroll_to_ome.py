@@ -691,11 +691,10 @@ def main():
             "output", 
             help="Name of directory that will contain the OME/zarr datastore dir")
     parser.add_argument(
-        '--chunk_size',
-        type=int,
-        nargs='+',
-        default=128, 
-        help="Size of chunk")
+            '--chunk_size',
+            type=int,
+            default=128, 
+            help="Size of chunk")
     parser.add_argument(
             "--nlevels", 
             type=int, 
@@ -743,6 +742,11 @@ def main():
             action="store_true",
             help="Create standardized volume format (equalize, mask, transform, etc.)"
     )
+    parser.add_argument(
+            "--surface_volume",
+            action="store_true",
+            help="Create a surface volume instead of a scroll volume"
+    )
 
 
     args = parser.parse_args()
@@ -758,6 +762,8 @@ def main():
     elif len(chunk_size) != 3:
         print("chunk_size must be a single number or 3 numbers")
         return 1
+    if args.surface_volume:
+        chunk_size = [512, 512, 4]
     nlevels = args.nlevels
     maxgb = args.max_gb
     zarr_only = args.zarr_only
