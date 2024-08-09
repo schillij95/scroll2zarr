@@ -468,10 +468,10 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
             )
 
     # nb of chunks in y direction that fit inside of max_gb
-    chy = cy // chunk_size + 1
+    chy = cy // chunk_size[1] + 1
     if maxgb is not None:
         maxy = int((maxgb*10**9)/(cx*chunk_size[0]*dt0.itemsize))
-        chy = maxy // chunk_size
+        chy = maxy // chunk_size[1]
         chy = max(1, chy)
 
     # nb of y chunk groups
@@ -508,7 +508,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
             if cur_zc != prev_zc:
                 if prev_zc >= 0:
                     zs = prev_zc*chunk_size[2]
-                    ze = zs+chunk_size
+                    ze = zs+chunk_size[2]
                     if ncgy == 1:
                         print("\nwriting, z range %d,%d"%(zs+z0, ze+z0))
                     else:
