@@ -623,7 +623,7 @@ def get_zarr_name(standard_config):
             return match.group(1)  # Returns the keV value as a string
         raise ValueError(f"Could not find keV value in {name}")
     kev = extract_kev(scroll_metadata['name'])
-    zarr_name = f"{scroll_id}_{kev}keV_{resolution}mum"
+    zarr_name = f"{kev}keV_{resolution}um_{scroll_id}"
     if standard_config['volume_type'] == "surface_volume":
         segment_id = standard_config['segment_id']
         zarr_name = os.path.join(zarr_name, f"{segment_id}")
