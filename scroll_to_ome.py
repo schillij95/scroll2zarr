@@ -269,7 +269,7 @@ def get_transforms(tiffdir, original_volume_id):
     transform_path = tiffdir / ".." / ".." / "transforms"
     transform_from_canonical_path = glob.glob(os.path.join(f"{transform_path}",f"*-to-{original_volume_id}.json"))
     if len(transform_from_canonical_path) == 0:
-        transform_to_canonical = np.eye(4)
+        transform_from_canonical = np.eye(4)
         scale = 1.0
     else:
         transform_from_canonical_path = transform_from_canonical_path[0]
