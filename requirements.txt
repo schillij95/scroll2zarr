@@ -3,5 +3,6 @@ tifffile
 scikit-image
 tqdm
 numpy
-cupy
 scikit-learn
+numcodecs
+opencv-python
