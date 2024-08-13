@@ -753,7 +753,9 @@ def main():
         return 1
 
     chunk_size = args.chunk_size
-    if isinstance(chunk_size, int) or len(chunk_size) == 1:
+    if isinstance(chunk_size, int):
+        chunk_size = (chunk_size, chunk_size, chunk_size)
+    elif len(chunk_size) == 1:
         chunk_size = (chunk_size[0], chunk_size[0], chunk_size[0])
     elif len(chunk_size) != 3:
         print("chunk_size must be a single number or 3 numbers")
