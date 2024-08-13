@@ -87,6 +87,13 @@ the `masked_volumes` directory
 
 ## Installation
 
+Clone the repository:
+
+
+```bash
+git clone --recurse-submodules https://github.com/schillij95/scroll2zarr
+```
+
 Only a few packages need to be installed in order to run
 `scroll_to_ome`:
 * zarr
