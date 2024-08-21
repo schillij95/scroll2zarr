@@ -168,10 +168,10 @@ def slice_count(s, maxx):
 def load_tiff(tiffname):
     print(tiffname)
     if str(tiffname).endswith('.tif'):
-        return tifffile.imread(tiffname)
+        return tifffile.imread(str(tiffname))
     elif str(tiffname).endswith('.jpg'):
         print("returning jpg")
-        image = cv2.imread(tiffname, cv2.IMREAD_GRAYSCALE)
+        image = cv2.imread(str(tiffname), cv2.IMREAD_GRAYSCALE)
         print(f"shape: {image.shape}")
         return image
     else:
@@ -386,12 +386,11 @@ def preprocess_tiff(inttiffs, itiff, standard_config):
     return tiff
 
 def write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, standard_config=None):
-    # TODO: Implement this with transform
     if standard_config is None or (not hasattr(standard_config, 'transform_to_canonical')) or standard_config['transform_to_canonical'] is None:
         tzarr[zs:z,ys:ye,:] = buf[:ze-zs,:ye-ys,:]
     else:
+        print("use transforms")
         # Transform the buffer to the canonical coordinate system
-        # TODO: transform_to_canonical
         transform_to_canonical = standard_config['transform_to_canonical']
         for z_ in range(zs, z):
             for y_ in range(ys, ye):
@@ -399,8 +398,6 @@ def write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, standard_config=None):
                     p = np.array([x, y_, z_, 1])
                     p_trans = np.dot(transform_to_canonical, p)[:3]
                     tzarr[p_trans[2], p_trans[1], p_trans[0]] = buf[z_-zs, y_-ys, x]
-
-        pass
 
 def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_config=None):
     if slices is None:
@@ -452,14 +449,18 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
         y0 = slice_start(yslice)
     print("cx,cy,cz",cx,cy,cz)
     print("x0,y0,z0",x0,y0,z0)
+    print("chunk_size (x, y, z)",chunk_size)
+
+    # Adjust chunk size order to z, y, x
+    chunk_size_zyx = (chunk_size[2], chunk_size[1], chunk_size[0])
     
     # compressor = numcodecs.zfpy.ZFPY(mode=None, tolerance=3)
-    compressor = numcodecs.Blosc(cname='zstd', clevel=9, shuffle=numcodecs.Blosc.BITSHUFFLE)
+    compressor = numcodecs.Blosc(cname='zstd', clevel=3, shuffle=numcodecs.Blosc.BITSHUFFLE)
     store = zarr.NestedDirectoryStore(zarrdir)
     tzarr = zarr.open(
             store=store, 
             shape=(cz, cy, cx), 
-            chunks=chunk_size,
+            chunks=chunk_size_zyx,
             dtype = tiff0.dtype,
             write_empty_chunks=False,
             fill_value=0,
@@ -760,6 +761,7 @@ def main():
     elif len(chunk_size) != 3:
         print("chunk_size must be a single number or 3 numbers")
         return 1
+
     nlevels = args.nlevels
     maxgb = args.max_gb
     zarr_only = args.zarr_only
