@@ -374,13 +374,13 @@ def preprocess_tiff(inttiffs, itiff, standard_config):
             tiff = (tiff/256).astype(np.uint8)
             # Zero 8 - n bits
             trailing_zero_bits = 8 - standard_config['n_bits']
-            bit_mask = int(2**8 - 1 - 2**trailing_zero_bits)
+            bit_mask = int(2**8 - 2**trailing_zero_bits)
         else:
             # To uint16
             tiff = tiff.astype(np.uint16)
             # Zero 16 - n bits
             trailing_zero_bits = 16 - standard_config['n_bits']
-            bit_mask = int(2**16 - 1 - 2**trailing_zero_bits)
+            bit_mask = int(2**16 - 2**trailing_zero_bits)
         tiff = (tiff & bit_mask).astype(tiff.dtype)
         tiff = tiff.astype(np.uint16) * 255 # Debug ONLY with Khartes
     return tiff
