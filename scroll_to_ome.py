@@ -382,7 +382,7 @@ def preprocess_tiff(inttiffs, itiff, standard_config):
             trailing_zero_bits = 16 - standard_config['n_bits']
             bit_mask = int(2**16 - 2**trailing_zero_bits)
         tiff = (tiff & bit_mask).astype(tiff.dtype)
-        tiff = tiff.astype(np.uint16) * 255 # Debug ONLY with Khartes
+        # tiff = tiff.astype(np.uint16) * 255 # Debug ONLY with Khartes
     return tiff
 
 def write_to_zarr(tzarr, buf, zs, z, ze, ys, ye, standard_config=None):
@@ -455,7 +455,7 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
     chunk_size_zyx = (chunk_size[2], chunk_size[1], chunk_size[0])
     
     # compressor = numcodecs.zfpy.ZFPY(mode=None, tolerance=3)
-    compressor = numcodecs.Blosc(cname='zstd', clevel=3, shuffle=numcodecs.Blosc.BITSHUFFLE)
+    compressor = numcodecs.Blosc(cname='zstd', clevel=3)
     store = zarr.NestedDirectoryStore(zarrdir)
     tzarr = zarr.open(
             store=store, 
