@@ -428,14 +428,14 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
     cz = maxz-z0+1
     
     try:
-        tiff0 = load_tiff(inttiffs[minz])
+        tiff0 = preprocess_tiff(inttiffs, minz, standard_config)
     except Exception as e:
         err = "Error reading %s: %s"%(inttiffs[minz],e)
         print(err)
         return err
     ny0, nx0 = tiff0.shape
     dt0 = tiff0.dtype
-    print("tiff size", nx0, ny0, "z range", minz, maxz)
+    print("tiff size", nx0, ny0, "z range", minz, maxz, "dtype", dt0)
 
     cx = nx0
     cy = ny0
@@ -455,13 +455,13 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
     chunk_size_zyx = (chunk_size[2], chunk_size[1], chunk_size[0])
     
     # compressor = numcodecs.zfpy.ZFPY(mode=None, tolerance=3)
-    compressor = numcodecs.Blosc(cname='zstd', clevel=3)
+    compressor = numcodecs.Blosc(cname='zstd', clevel=3, shuffle=numcodecs.Blosc.NOSHUFFLE)
     store = zarr.NestedDirectoryStore(zarrdir)
     tzarr = zarr.open(
             store=store, 
             shape=(cz, cy, cx), 
             chunks=chunk_size_zyx,
-            dtype = tiff0.dtype,
+            dtype = dt0,
             write_empty_chunks=False,
             fill_value=0,
             compressor=compressor,
