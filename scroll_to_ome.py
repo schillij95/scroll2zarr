@@ -454,7 +454,6 @@ def tifs2zarr(tiffdir, zarrdir, chunk_size, slices=None, maxgb=None, standard_co
     # Adjust chunk size order to z, y, x
     chunk_size_zyx = (chunk_size[2], chunk_size[1], chunk_size[0])
     
-    # compressor = numcodecs.zfpy.ZFPY(mode=None, tolerance=3)
     compressor = numcodecs.Blosc(cname='zstd', clevel=3, shuffle=numcodecs.Blosc.NOSHUFFLE)
     store = zarr.NestedDirectoryStore(zarrdir)
     tzarr = zarr.open(
@@ -589,6 +588,7 @@ def resize(zarrdir, old_level, num_threads, algorithm="mean"):
     cz, cy, cx = idata.chunks
     sz, sy, sx = idata.shape
     store = zarr.NestedDirectoryStore(odir)
+    compressor = numcodecs.Blosc(cname='zstd', clevel=3, shuffle=numcodecs.Blosc.NOSHUFFLE)
     odata = zarr.open(
             store=store,
             shape=(divp1(sz,2), divp1(sy,2), divp1(sx,2)),
@@ -596,7 +596,7 @@ def resize(zarrdir, old_level, num_threads, algorithm="mean"):
             dtype=idata.dtype,
             write_empty_chunks=False,
             fill_value=0,
-            compressor=None,
+            compressor=compressor,
             mode='w',
             )
 
