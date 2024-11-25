@@ -1,3 +1,7 @@
+# This repository has been archived and is beeing further developed by the monorepo of the Vesuvius Organization Team over at https://github.com/ScrollPrize/villa/tree/main/foundation/scroll2zarr
+
+Thank you to everyone who helped develop it and continues to do so.
+
 # OME-Zarr tools for the Vesuvius scrolls
 
 ### What is OME-Zarr?
